@@ -96,13 +96,50 @@ from ufl import ds, dx, grad, inner
 # to create a mesh consisting of 32 x 32 squares with each square
 # divided into two triangles, we do as follows ::
 
-# Create mesh and define function space
-mesh = RectangleMesh(
-    MPI.COMM_WORLD,
-    [np.array([0, 0, 0]), np.array([1, 1, 0])], [32, 32],
-    CellType.triangle, dolfinx.cpp.mesh.GhostMode.none)
+# # Create mesh and define function space
+# mesh = RectangleMesh(
+#     MPI.COMM_WORLD,
+#     [np.array([0, 0, 0]), np.array([1, 1, 0])], [32, 32],
+#     CellType.triangle, dolfinx.cpp.mesh.GhostMode.none)
 
-V = FunctionSpace(mesh, ("Lagrange", 1))
+# V = FunctionSpace(mesh, ("Lagrange", 1))
+
+# Create mesh and define function space
+mesh = BoxMesh(
+    MPI.COMM_WORLD,
+    [np.array([0, 0, 0]), np.array([1, 1, 1])], [2, 2, 2],
+    CellType.tetrahedron, dolfinx.cpp.mesh.GhostMode.none)
+
+tets = mesh.topology.connectivity(3, 0)
+mesh.topology.create_connectivity(2, 0)
+tris = mesh.topology.connectivity(2, 0)
+mesh.topology.create_connectivity(2, 3)
+tri_to_tet = mesh.topology.connectivity(2, 3)
+
+# im2 = mesh.topology.index_map(2)
+# print('Index Map 2= ',im2.size_local, im2.size_global, im2.num_ghosts)
+
+surface_tris = []
+for i in range(tris.num_nodes):
+    if (len(tri_to_tet.links(i)) == 1):
+        surface_tris += [i]
+surface_tris = np.array(surface_tris)
+
+print("Surface tris = ", surface_tris)
+
+mesh.topology.create_connectivity(0, 2)
+vert_to_tri = mesh.topology.connectivity(0, 2)
+
+for i in surface_tris:
+    surface_neighbours = []
+    for j in tris.links(i):
+        neighbour_tris = vert_to_tri.links(j)
+        surface_neighbours += [np.intersect1d(neighbour_tris, surface_tris)]
+
+    print(i, np.unique(np.hstack(surface_neighbours), return_counts=True))
+
+quit()
+
 
 # The second argument to :py:class:`FunctionSpace
 # <dolfinx.function.FunctionSpace>` is the finite element
