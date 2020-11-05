@@ -132,17 +132,13 @@ def test_mpi_p2p_alldata_gather():
             
             bm_nodes, uni = np.unique(bm_nodes_sorted, return_index=True) 
             bm_coords = bm_coords_sorted[uni]
-            
             bm_nodes_list = list(bm_nodes)
             
             # bm_cells - remap cell indices between 0-len(bm_nodes) 
             # this can be better
             bm_cells = np.array([[bm_nodes_list.index(i) for i in tri] for tri in all_boundary])
             print(bm_cells)
-            # print(bm_nodes)
-            # print(bm_coords)
             exit(0)
-            bm_cells = np.array([[bm_nodes.index(i) for i in tri] for tri in all_boundary])
             print(len(bm_nodes))
             print(len(bm_cells))
             print(len(bm_coords))
