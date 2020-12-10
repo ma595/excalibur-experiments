@@ -66,6 +66,16 @@ def get_num_bdry_dofs(fenics_mesh):
     bm_nodes = set()
     fenics_space = dolfinx.FunctionSpace(fenics_mesh, ("CG", 1))
     global_dofs_map = fenics_space.dofmap.index_map.global_indices(False)
+
+    # print(fenics_space.dofmap.index_map.ghosts)
+    mapping, dof_map = vertex_dofmap(fenics_mesh)
+    # value of 9 
+    vertex_err_val = 9
+
+    if vertex_err_val in mapping.keys():
+        print("value of corresponding dof is ", mapping[9])
+
+    
     for i, tri in enumerate(boundary):
         for j, node in enumerate(tri):
             # print(node, boundary[i][j])
@@ -74,15 +84,25 @@ def get_num_bdry_dofs(fenics_mesh):
             boundary[i][j] = glob_geom_node
             bm_nodes.add(node)
     bm_nodes_global = [ global_dofs_map[i] for i in bm_nodes ]
-    print("RANK ", comm.Get_rank())
+    ghosts = fenics_space.dofmap.index_map.ghosts
+    ghosts_list = list(ghosts)
+    ghost_owner = fenics_space.dofmap.index_map.ghost_owner_rank()
+    ownership = np.ones_like(bm_nodes_global, dtype=np.int32) * comm.rank
+    for i in range(len(bm_nodes_global)):
+        if bm_nodes_global[i] in ghosts_list:
+            index = ghosts_list.index(bm_nodes_global[i])
+            ownership[i] = ghost_owner[index]
+    print(ownership)
     print(bm_nodes_global)
+    print("RANK {} \n".format(comm.Get_rank()))
+
 
     root = 0
     rank = comm.Get_rank()
     sendbuf = np.array(bm_nodes_global)
     sendcounts = np.array(comm.gather(len(sendbuf), root))
 
-    print(sendcounts)
+    # print(sendcounts)
 
     if rank == root:
         print("sendcounts: {}, total: {}".format(sendcounts, sum(sendcounts)))
@@ -94,7 +114,6 @@ def get_num_bdry_dofs(fenics_mesh):
     if rank == root:
         bm_nodes_unique = sorted(np.unique(recvbuf))
         print("Gathered array: {}, unique length: {}".format(bm_nodes_unique, len(bm_nodes_unique)))
-
         return len(bm_nodes_unique)
     return 0
         # missing = 0
@@ -122,6 +141,8 @@ def get_num_bdry_verts(fenics_mesh):
 
     ghosts = fenics_mesh.topology.index_map(0).ghosts
     ghost_owner = fenics_mesh.topology.index_map(0).ghost_owner_rank()
+    all_global = fenics_mesh.topology.index_map(0).global_indices(False)
+    all_indices = fenics_mesh.topology.index_map(0).indices(False)
     # print(sendbuf_vertices)
     ownership = np.ones_like(list(exterior_nodes), dtype=np.int32) * comm.rank
     ext_nodes_list = list(exterior_nodes)
@@ -135,9 +156,10 @@ def get_num_bdry_verts(fenics_mesh):
     # print("\n")
     # print("exterior nodes length (global)", len(exterior_nodes))
     sendbuf_vertices = np.asarray(list(exterior_nodes), dtype=np.int64)
-    print(ownership) 
-    print(ext_nodes_list)
+    print("ownership ", ownership) 
+    print("external nodes from exterior_facet_indices ", ext_nodes_list)
     print("size local ", fenics_mesh.topology.index_map(0).size_local)
+    print("all indices ", all_indices)
     print("RANK {} \n".format(rank))
     sendbuf_vertices = sendbuf_vertices[ownership == rank]
     # print(sum(sendbuf_vertices))
@@ -174,6 +196,11 @@ def test_mesh_bdry(fenics_mesh):
     num_bdry_verts = get_num_bdry_verts(fenics_mesh)
     if rank == 0:
         print(comm.Get_size(), num_bdry_verts)
+
+    # num_bdry_dofs = get_num_bdry_dofs(fenics_mesh)
+    # if rank == 0:
+    #     print(comm.Get_size(), num_bdry_dofs)
+
 
 
 def play(fenics_mesh):
