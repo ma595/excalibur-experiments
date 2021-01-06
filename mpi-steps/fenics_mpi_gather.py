@@ -13,6 +13,15 @@ from dolfinx.io import XDMFFile
 
 import bempp.api
 
+def read_mesh_from_file():
+    comm = MPI.COMM_WORLD
+    # encoding = dolfinx.cpp.io.XDMFFile.Encoding.ASCII
+    encoding = XDMFFile.Encoding.HDF5
+    path = "square.xdmf"
+    infile = XDMFFile(comm, path, 'r', encoding)
+    fenics_mesh = infile.read_mesh(name='square')
+    print(fenics_mesh.name)
+
 # return global node indices. 
 def bm_from_fenics_mesh_mpi(fenics_mesh, fenics_space):
     boundary = entities_to_geometry( fenics_mesh,
@@ -20,6 +29,7 @@ def bm_from_fenics_mesh_mpi(fenics_mesh, fenics_space):
             exterior_facet_indices(fenics_mesh),
             True,
             )
+
     dofmap = fenics_space.dofmap.index_map.global_indices(False)
     geom_map = fenics_mesh.geometry.index_map().global_indices(False)
     dofmap_mesh = fenics_mesh.geometry.dofmap
@@ -158,3 +168,4 @@ def test_mpi_p2p_alldata_gather():
             comm.Send([np.array(bm_nodes, np.int32), MPI.LONG], dest=0, tag=102)
 
 test_mpi_p2p_alldata_gather()
+# read_mesh_from_file()
