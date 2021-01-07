@@ -92,17 +92,17 @@ def get_num_bdry_dofs(fenics_mesh):
         if bm_nodes_global[i] in ghosts_list:
             index = ghosts_list.index(bm_nodes_global[i])
             ownership[i] = ghost_owner[index]
+
     print(ownership)
     print(bm_nodes_global)
     print("RANK {} \n".format(comm.Get_rank()))
-
-
     root = 0
     rank = comm.Get_rank()
     sendbuf = np.array(bm_nodes_global)
+    # print("sendbuf ", sendbuf)
     sendcounts = np.array(comm.gather(len(sendbuf), root))
 
-    # print(sendcounts)
+    print("sendcounts ", sendcounts)
 
     if rank == root:
         print("sendcounts: {}, total: {}".format(sendcounts, sum(sendcounts)))
@@ -167,7 +167,7 @@ def get_num_bdry_verts(fenics_mesh):
     # print("ghosts", fenics_mesh.topology.index_map(0).ghosts)
     # print("ghost owner rank ", fenics_mesh.topology.index_map(0).ghost_owner_rank())
 
-    # print(sendcounts)
+    print("sendcounts ", sendcounts)
     if rank == root:
         # print("sendcounts: {}, total: {}".format(sendcounts, sum(sendcounts)))
         recvbuf = np.empty(sum(sendcounts), dtype=np.int64)
