@@ -1,10 +1,13 @@
-# Get all relevant info from fenics_mesh (boundary mesh, dofs, everything we need) gather then send
 import numpy as np
 from petsc4py import PETSc
 from mpi4py import MPI
-from collections import OrderedDict
 
 def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
+    """
+    Create a Bempp boundary grid from a FEniCS Mesh.
+    Return the Bempp grid and a map from the node numberings of the FEniCS
+    mesh to the node numbers of the boundary grid.
+    """
     from dolfinx.cpp.mesh import entities_to_geometry, exterior_facet_indices
 
     boundary = entities_to_geometry( fenics_mesh,
@@ -23,17 +26,15 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
     # print("geometry map ", geom_map)
     # print("dofmap mesh", dofmap_mesh)
     # print("number of facets ", len(exterior_facet_indices(fenics_mesh)))
-    # aren't I meant to be using the dofmap here?
     bm_nodes = set()
     for i, tri in enumerate(boundary):
         for j, node in enumerate(tri):
             # print(node, boundary[i][j])
-            glob_geom_node = geom_map[node]
-            boundary[i][j] = glob_geom_node
+            glob_dof_node = dofmap[node]
+            boundary[i][j] = glob_dof_node
             bm_nodes.add(node)
 
-    # aren't I meant to be using the dofmap here?
-    bm_nodes_global = [ geom_map[i] for i in bm_nodes ]
+    bm_nodes_global = [ dofmap[i] for i in bm_nodes ]
     bm_nodes = list(bm_nodes)
     bm_coords = fenics_mesh.geometry.x[bm_nodes]
     # bm_cells - remap cell indices between 0-len(bm_nodes) 
@@ -116,26 +117,6 @@ def send(comm, arr, dtype, tag):
     # comm.Send([recvbuf_A, MPI.DOUBLE_COMPLEX], dest=0, tag=112)
     comm.Send([arr, dtype], dest=0, tag=tag)
     
-def send_A_actual_hack(comm, fenicsx_comm, A, actual):
-    import gather_fns as gfns
-    recvbuf_A = gfns.gather_petsc_matrix(A, fenicsx_comm)
-    recvbuf_actual = gfns.create_gather_to_zero_vec(actual.vector)(actual.vector)[:]
-    if fenicsx_comm.rank == 0: 
-        comm.Send([recvbuf_actual, MPI.DOUBLE_COMPLEX], dest=0, tag=104)
-        comm.Send([recvbuf_A, MPI.DOUBLE_COMPLEX], dest=0, tag=112)
-
-def get_A_actual_hack(comm, num_fenics_vertices=27):
-    info = MPI.Status()
-    av = recv(comm, MPI.DOUBLE_COMPLEX, np.cdouble, info, 112)
-    A = PETSc.Mat().create(comm=MPI.COMM_SELF)
-    A.setSizes([num_fenics_vertices, num_fenics_vertices])
-    A.setType("aij")
-    A.setUp()
-    A.setValues(list(range(0, num_fenics_vertices)), list(range(0, num_fenics_vertices)), av.reshape(num_fenics_vertices, num_fenics_vertices))
-    A.assemble()
-    actual = recv(comm, MPI.DOUBLE_COMPLEX, np.cdouble, info, 104)
-    return A, actual
-
 
 def p1_trace(comm, fenicsx_comm, fenics_mesh, fenics_space):
     # if comm.rank == 0:
@@ -150,16 +131,18 @@ def p1_trace(comm, fenicsx_comm, fenics_mesh, fenics_space):
     # print("tetra ", fenics_mesh.topology.index_map(3).global_indices(False))
     # print("indices ", fenics_mesh.topology.index_map(0).global_indices(False))
     # print(fenics_mesh.topology.connectivity(3,0))
-    print(fenics_space.dofmap.dof_layout.entity_dofs(0,1))
+    # print(fenics_space.dofmap.dof_layout.entity_dofs(0,1))
 
-    # do just on a single process first
+    # vertices on single process
     num_fenics_vertices = fenics_mesh.topology.connectivity(0, 0).num_nodes
-    # this map won't work because our num_fenics_vertices number is lower than the global number of vertices. Therefore will go out of bounds.
+    # this map won't work because our num_fenics_vertices number is lower than the global number of vertices;
+    # therefore will go out of bounds.
     # print("check ", fenics_space.dofmap.dof_layout.entity_dofs(0, 3)[0])
     
     geom_map = fenics_mesh.geometry.index_map().global_indices(False)
     dofs_map = fenics_space.dofmap.index_map.global_indices(False)
-    
+   
+    # FEniCS dofs to vertices.
     dof_to_vertex_map = np.zeros(num_fenics_vertices, dtype=np.int64)
     dof_vertex_map_global = {}
     tets = fenics_mesh.geometry.dofmap
@@ -197,8 +180,6 @@ def p1_trace(comm, fenicsx_comm, fenics_mesh, fenics_space):
 #     else:
 #         raise NotImplementedError()
 
-    
-
 def fenics_to_bempp_trace_data(comm):
     """
     Return the P1 trace operator.
@@ -206,29 +187,29 @@ def fenics_to_bempp_trace_data(comm):
     where space is a Bempp space object and trace_matrix is the corresponding 
     matrix that maps the coefficients of a FEniCS function to its boundary trace coefficients in the corresponding Bempp space.
     """
+
     import bempp.api
     from scipy.sparse import coo_matrix
     import numpy as np
 
+    # Recv fenics boundary 
     bm_nodes, bm_cells, bm_coords, num_fenics_vertices = recv_fenicsx_bm(comm)
 
-    info = MPI.Status()
-    dof_to_vertex_map_1 = recv(comm, MPI.LONG, np.int64, info, 15)
-
-    print(dof_to_vertex_map_1)
-
     bempp_boundary_grid = bempp.api.Grid(bm_coords.transpose(), bm_cells.transpose())
+    
+    # First get trace space
     space = bempp.api.function_space(bempp_boundary_grid, "P", 1)
 
-    # this all need to be delegated to fenicsx_mpi
-    ####
+    # FEniCS vertices to bempp dofs
     b_vertices_from_vertices = coo_matrix(
         (np.ones(len(bm_nodes)), (np.arange(len(bm_nodes)), bm_nodes)),
         shape=(len(bm_nodes), num_fenics_vertices),
         dtype="float64",
     ).tocsc()
 
-    dof_to_vertex_map = np.arange(num_fenics_vertices, dtype=np.int32)
+    info = MPI.Status()
+    dof_to_vertex_map = recv(comm, MPI.LONG, np.int64, info, 15)
+    # dof_to_vertex_map = np.arange(num_fenics_vertices, dtype=np.int32)
     
     vertices_from_fenics_dofs = coo_matrix(
         (
@@ -238,8 +219,37 @@ def fenics_to_bempp_trace_data(comm):
         shape=(num_fenics_vertices, num_fenics_vertices),
         dtype="float64",
     ).tocsc()
-    #### 
 
+    # Get trace matrix by multiplication
     trace_matrix = b_vertices_from_vertices @ vertices_from_fenics_dofs
 
+    # Now return everything
     return space, trace_matrix, num_fenics_vertices
+
+
+def send_A_actual_hack(comm, fenicsx_comm, A, actual):
+    """
+    Hack function (temporary) - send part
+    """
+    import gather_fns as gfns
+    recvbuf_A = gfns.gather_petsc_matrix(A, fenicsx_comm)
+    recvbuf_actual = gfns.create_gather_to_zero_vec(actual.vector)(actual.vector)[:]
+    if fenicsx_comm.rank == 0: 
+        comm.Send([recvbuf_actual, MPI.DOUBLE_COMPLEX], dest=0, tag=104)
+        comm.Send([recvbuf_A, MPI.DOUBLE_COMPLEX], dest=0, tag=112)
+
+def get_A_actual_hack(comm, num_fenics_vertices=27):
+    """
+    Hack function (temporary) - recv part
+    """
+    info = MPI.Status()
+    av = recv(comm, MPI.DOUBLE_COMPLEX, np.cdouble, info, 112)
+    A = PETSc.Mat().create(comm=MPI.COMM_SELF)
+    A.setSizes([num_fenics_vertices, num_fenics_vertices])
+    A.setType("aij")
+    A.setUp()
+    A.setValues(list(range(0, num_fenics_vertices)), list(range(0, num_fenics_vertices)), av.reshape(num_fenics_vertices, num_fenics_vertices))
+    A.assemble()
+    actual = recv(comm, MPI.DOUBLE_COMPLEX, np.cdouble, info, 104)
+    return A, actual
+
