@@ -45,51 +45,30 @@ def test_simple_helmholtz_problem(N):
         actual = dolfinx.Function(fenics_space)
         actual.interpolate(lambda x: np.exp(1j * k * x[0]))
         
-        from fenicsx_mpi import bm_from_fenics_mesh, send_A_actual_hack
+        from fenicsx_mpi import bm_from_fenics_mesh, p1_trace, send_A_actual_hack
 
         bm_from_fenics_mesh(comm, fenicsx_comm, fenics_mesh, fenics_space)
 
         send_A_actual_hack(comm, fenicsx_comm, A, actual)
+
+        p1_trace(comm, fenicsx_comm, fenics_mesh, fenics_space)
     # PROCESS 0: (BEMPP process)
     # Receive fenics_mesh from PROCESS 1 (fenics mesh distributed
     # across PROCESS 1 and PROCESS 2. 
     else:
     # assert newcomm == MPI.COMM_NULL
         import bempp.api
-        from fenicsx_mpi import recv_fenicsx_bm, get_A_actual_hack
-        bm_nodes, bm_cells, bm_coords, num_fenics_vertices = recv_fenicsx_bm(comm)
+        from fenicsx_mpi import  get_A_actual_hack, fenics_to_bempp_trace_data
+
         # print(num_fenics_vertices)
+
+        trace_space, trace_matrix, num_fenics_vertices = fenics_to_bempp_trace_data(comm)
+
         A, actual = get_A_actual_hack(comm, num_fenics_vertices)
         k = 2
         # print(len(bm_cells), len(bm_coords))
-        bempp_boundary_grid = bempp.api.Grid(bm_coords.transpose(), bm_cells.transpose())
-        space = bempp.api.function_space(bempp_boundary_grid, "P", 1)
-        trace_space = space
 
 
-	# this all need to be delegated to fenicsx_mpi	
-	####
-        b_vertices_from_vertices = coo_matrix(
-            (np.ones(len(bm_nodes)), (np.arange(len(bm_nodes)), bm_nodes)),
-            shape=(len(bm_nodes), num_fenics_vertices),
-            dtype="float64",
-        ).tocsc()
-
-        dof_to_vertex_map = np.arange(num_fenics_vertices, dtype=np.int64)
-
-        # print(dof_to_vertex_map)
-        
-        vertices_from_fenics_dofs = coo_matrix(
-            (
-                np.ones(num_fenics_vertices),
-                (dof_to_vertex_map, np.arange(num_fenics_vertices)),
-            ),
-            shape=(num_fenics_vertices, num_fenics_vertices),
-            dtype="float64",
-        ).tocsc()
-	#### 
-
-        trace_matrix = b_vertices_from_vertices @ vertices_from_fenics_dofs
         bempp_space = bempp.api.function_space(trace_space.grid, "DP", 0)
 
         id_op = bempp.api.operators.boundary.sparse.identity(

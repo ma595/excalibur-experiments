@@ -2,6 +2,7 @@
 import numpy as np
 from petsc4py import PETSc
 from mpi4py import MPI
+from collections import OrderedDict
 
 def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
     from dolfinx.cpp.mesh import entities_to_geometry, exterior_facet_indices
@@ -12,6 +13,7 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
             True,
             )
 
+    # aren't I meant to be using the dofmap here?
     dofmap = fenics_space.dofmap.index_map.global_indices(False)
     geom_map = fenics_mesh.geometry.index_map().global_indices(False)
     dofmap_mesh = fenics_mesh.geometry.dofmap
@@ -21,6 +23,7 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
     # print("geometry map ", geom_map)
     # print("dofmap mesh", dofmap_mesh)
     # print("number of facets ", len(exterior_facet_indices(fenics_mesh)))
+    # aren't I meant to be using the dofmap here?
     bm_nodes = set()
     for i, tri in enumerate(boundary):
         for j, node in enumerate(tri):
@@ -29,6 +32,7 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
             boundary[i][j] = glob_geom_node
             bm_nodes.add(node)
 
+    # aren't I meant to be using the dofmap here?
     bm_nodes_global = [ geom_map[i] for i in bm_nodes ]
     bm_nodes = list(bm_nodes)
     bm_coords = fenics_mesh.geometry.x[bm_nodes]
@@ -40,19 +44,19 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
     # print('shape bm_cells ', bm_cells.shape)
     # print('bm_cells \n', bm_cells)
     # print("dofmap ", fenics_mesh.geometry.dofmap)
-    gathered_bm_coords = gather(fenics_comm, bm_coords, np.float64)
-    gathered_bm_tris = gather(fenics_comm, boundary, np.int32)
-    gathered_bm_nodes = gather(fenics_comm, np.asarray(bm_nodes_global, np.int32), np.int32)
+    gathered_bm_coords = gather(fenics_comm, bm_coords, 3, np.float64)
+    gathered_bm_tris = gather(fenics_comm, boundary, 3, np.int32)
+    gathered_bm_nodes = gather(fenics_comm, np.asarray(bm_nodes_global, np.int32), 1, np.int32)
 
     global_alldofs = np.asarray(fenics_space.dofmap.index_map.global_indices(False), dtype=np.int32)
-    gathered_global_alldofs = gather(fenics_comm, global_alldofs, np.int32)
+    gathered_global_alldofs = gather(fenics_comm, global_alldofs, 1, np.int32)
 
     if fenics_comm.rank == 0:
         all_bm_coords = gathered_bm_coords.reshape(int(len(gathered_bm_coords)/3),3) # 34 (26) 
         all_bm_tris = gathered_bm_tris.reshape(int(len(gathered_bm_tris)/3),3) # 48 (48)
-        all_bm_nodes = gathered_bm_nodes # 34 (26)
+        all_bm_nodes = gathered_bm_nodes 
 
-        # Sort gathered nodes and remove repetitions (ghosts on bdry)
+        # sort gathered nodes and remove repetitions (ghosts on bdry)
         sorted_indices = all_bm_nodes.argsort()
         all_bm_nodes_sorted = all_bm_nodes[sorted_indices]
         all_bm_coords_sorted = all_bm_coords[sorted_indices]
@@ -65,12 +69,19 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
         all_bm_nodes = np.asarray(all_bm_nodes_list, dtype=np.int32)
         # Send to Bempp process 
         send(comm, all_bm_coords, MPI.DOUBLE, 100)
-        send(comm, all_bm_cells, MPI.LONG, 101)
-        send(comm, all_bm_nodes, MPI.LONG, 102)
+        send(comm, all_bm_cells, MPI.INT, 101)
+        send(comm, all_bm_nodes, MPI.INT, 102)
+        # print("all_bm_cells ", type(all_bm_cells))
 
         num_fenics_vertices = len(np.unique(np.sort(gathered_global_alldofs)))
         comm.send(num_fenics_vertices, dest=0, tag=103)
 
+def get_num_fenics_vertices_unique_fenics(fenicsx_comm, fenics_space):
+    global_alldofs = np.asarray(fenics_space.dofmap.index_map.global_indices(False), dtype=np.int32)
+    gathered_global_alldofs = gather(fenicsx_comm, global_alldofs, 1, np.int32)
+    
+    num_fenics_vertices = len(np.unique(np.sort(gathered_global_alldofs)))
+    return num_fenics_vertices
 
 def recv_fenicsx_bm(comm):
     info = MPI.Status() 
@@ -80,6 +91,7 @@ def recv_fenicsx_bm(comm):
     bm_tris = bm_tris.reshape(int(len(bm_tris)/3), 3)
     bm_nodes = recv(comm, MPI.INT, np.int32, info, 102)
 
+    # print(bm_coords, bm_tris, bm_nodes)
     num_fenics_vertices = comm.recv(source=1, tag=103)
     return bm_nodes, bm_tris, bm_coords, num_fenics_vertices
 
@@ -92,15 +104,11 @@ def recv(comm, mpi_type, np_type, info, tag):
     comm.Recv([arr, mpi_type], source=1, tag=tag)
     return arr
 
-def gather(comm, arr, dtype):
+def gather(comm, arr, mdim, dtype):
     gathered_arr = None
     sendcounts = np.array(comm.gather(len(arr), root=0))
     if comm.rank == 0:
-        info = MPI.Status()
-        m = 1
-        if arr.ndim == 2:
-            m = 3
-        gathered_arr = np.empty(sum(sendcounts)*m, dtype=dtype)
+        gathered_arr = np.empty(sum(sendcounts)*mdim, dtype=dtype)
     comm.Gather(arr, gathered_arr, root=0)
     return gathered_arr
 
@@ -129,24 +137,109 @@ def get_A_actual_hack(comm, num_fenics_vertices=27):
     return A, actual
 
 
-def p1_trace():
-    dof_to_vertex_map = np.zeros(num_fenics_vertices, dtype=np.int64)
+def p1_trace(comm, fenicsx_comm, fenics_mesh, fenics_space):
+    # if comm.rank == 0:
+    #     num_fenics_vertices = get_num_fenics_vertices_unique_fenics(fenicsx_comm, fenics_space)
+    #     print(num_fenics_vertices)
+    # dof_to_vertex_map = np.zeros(num_fenics_vertices, dtype=np.int64)
 
+    # not always guaranteed to be equivalent. 
+    fs_dofs = fenics_space.dofmap.cell_dofs(0)
+    tets = fenics_mesh.geometry.dofmap
+    # print(fenics_mesh.geometry.index_map())
+    # print("tetra ", fenics_mesh.topology.index_map(3).global_indices(False))
+    # print("indices ", fenics_mesh.topology.index_map(0).global_indices(False))
+    # print(fenics_mesh.topology.connectivity(3,0))
+    print(fenics_space.dofmap.dof_layout.entity_dofs(0,1))
+
+    # do just on a single process first
+    num_fenics_vertices = fenics_mesh.topology.connectivity(0, 0).num_nodes
+    # this map won't work because our num_fenics_vertices number is lower than the global number of vertices. Therefore will go out of bounds.
+    # print("check ", fenics_space.dofmap.dof_layout.entity_dofs(0, 3)[0])
+    
+    geom_map = fenics_mesh.geometry.index_map().global_indices(False)
+    dofs_map = fenics_space.dofmap.index_map.global_indices(False)
+    
+    dof_to_vertex_map = np.zeros(num_fenics_vertices, dtype=np.int64)
+    dof_vertex_map_global = {}
+    tets = fenics_mesh.geometry.dofmap
+    for tet in range(tets.num_nodes):
+        cell_dofs = fenics_space.dofmap.cell_dofs(tet)
+        cell_verts = tets.links(tet)
+
+        for v in range(4):
+            vertex_n = cell_verts[v]
+            dof = cell_dofs[fenics_space.dofmap.dof_layout.entity_dofs(0, v)[0]]
+            dof_to_vertex_map[dof] = vertex_n
+            
+            dof_vertex_map_global[dofs_map[dof]] = geom_map[vertex_n]
+
+    dof_vertex_map_global_np = np.array(list(dof_vertex_map_global.items()), dtype=np.int64)
+    dof_vertex_map_global_np = dof_vertex_map_global_np[np.argsort(dof_vertex_map_global_np[:,0])]
+
+    # print(dof_vertex_map_global_np)
+    gathered_dof_vertex_map = gather(fenicsx_comm, dof_vertex_map_global_np, 2, np.int64)
+    if fenicsx_comm.rank == 0:
+        gathered_dof_vertex_map = gathered_dof_vertex_map.reshape(int(len(gathered_dof_vertex_map)/2),2)
+
+        gathered_dof_vertex_map = gathered_dof_vertex_map[gathered_dof_vertex_map[:,0].argsort(kind='mergesort')] 
+        # print(gathered_dof_vertex_map)
+        dof_to_vertex_map = np.unique(gathered_dof_vertex_map, axis=0)[:,1]
+        send(comm, dof_to_vertex_map.ravel(), MPI.LONG, 15)
+
+# def fenics_to_bempp_trace_data():
+#     """Returns tuple (space,trace_matrix)."""
+#     family, degree = fenics_space_info(fenics_space)
+
+#     if family == "Lagrange":
+#         if degree == 1:
+#             return p1_trace_recv()
+#     else:
+#         raise NotImplementedError()
+
+    
+
+def fenics_to_bempp_trace_data(comm):
+    """
+    Return the P1 trace operator.
+    This function returns a pair (space, trace_matrix),
+    where space is a Bempp space object and trace_matrix is the corresponding 
+    matrix that maps the coefficients of a FEniCS function to its boundary trace coefficients in the corresponding Bempp space.
+    """
+    import bempp.api
+    from scipy.sparse import coo_matrix
+    import numpy as np
+
+    bm_nodes, bm_cells, bm_coords, num_fenics_vertices = recv_fenicsx_bm(comm)
+
+    info = MPI.Status()
+    dof_to_vertex_map_1 = recv(comm, MPI.LONG, np.int64, info, 15)
+
+    print(dof_to_vertex_map_1)
+
+    bempp_boundary_grid = bempp.api.Grid(bm_coords.transpose(), bm_cells.transpose())
+    space = bempp.api.function_space(bempp_boundary_grid, "P", 1)
+
+    # this all need to be delegated to fenicsx_mpi
+    ####
     b_vertices_from_vertices = coo_matrix(
         (np.ones(len(bm_nodes)), (np.arange(len(bm_nodes)), bm_nodes)),
         shape=(len(bm_nodes), num_fenics_vertices),
         dtype="float64",
     ).tocsc()
 
-    dof_to_vertex_map = np.arange(num_fenics_vertices, dtype=np.int64)
-
-    # print(dof_to_vertex_map)
+    dof_to_vertex_map = np.arange(num_fenics_vertices, dtype=np.int32)
     
     vertices_from_fenics_dofs = coo_matrix(
         (
-        np.ones(num_fenics_vertices),
-        (dof_to_vertex_map, np.arange(num_fenics_vertices)),
+            np.ones(num_fenics_vertices),
+            (dof_to_vertex_map, np.arange(num_fenics_vertices)),
         ),
         shape=(num_fenics_vertices, num_fenics_vertices),
         dtype="float64",
     ).tocsc()
+    #### 
+
+    trace_matrix = b_vertices_from_vertices @ vertices_from_fenics_dofs
+
+    return space, trace_matrix, num_fenics_vertices
