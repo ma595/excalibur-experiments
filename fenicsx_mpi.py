@@ -16,15 +16,11 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
             True,
             )
 
-    # aren't I meant to be using the dofmap here?
     dofmap = fenics_space.dofmap.index_map.global_indices(False)
     geom_map = fenics_mesh.geometry.index_map().global_indices(False)
     dofmap_mesh = fenics_mesh.geometry.dofmap
 
-    assert dofmap == geom_map
-    # print("dofmap ", dofmap)
-    # print("geometry map ", geom_map)
-    # print("dofmap mesh", dofmap_mesh)
+    # assert dofmap == geom_map
     # print("number of facets ", len(exterior_facet_indices(fenics_mesh)))
     bm_nodes = set()
     for i, tri in enumerate(boundary):
@@ -39,12 +35,11 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
     bm_coords = fenics_mesh.geometry.x[bm_nodes]
     # bm_cells - remap cell indices between 0-len(bm_nodes) 
     # bm_cells = np.array([[bm_nodes.index(i) for i in tri] for tri in boundary])
-    # print("bm_coords\n", bm_coords)
-    # print("bm_nodes\n", bm_nodes)
-    # print("boundary\n", boundary)
     # print('shape bm_cells ', bm_cells.shape)
     # print('bm_cells \n', bm_cells)
-    # print("dofmap ", fenics_mesh.geometry.dofmap)
+    # print('bm_coords len ', len(bm_coords))
+    # print('bm_coords type ', type(bm_coords[0][0]))
+    # print("RANK ", fenics_comm.rank)
     gathered_bm_coords = gather(fenics_comm, bm_coords, 3, np.float64)
     gathered_bm_tris = gather(fenics_comm, boundary, 3, np.int32)
     gathered_bm_nodes = gather(fenics_comm, np.asarray(bm_nodes_global, np.int32), 1, np.int32)
@@ -53,8 +48,8 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
     gathered_global_alldofs = gather(fenics_comm, global_alldofs, 1, np.int32)
 
     if fenics_comm.rank == 0:
-        all_bm_coords = gathered_bm_coords.reshape(int(len(gathered_bm_coords)/3),3) # 34 (26) 
-        all_bm_tris = gathered_bm_tris.reshape(int(len(gathered_bm_tris)/3),3) # 48 (48)
+        all_bm_coords = gathered_bm_coords.reshape(int(len(gathered_bm_coords)/3),3)
+        all_bm_tris = gathered_bm_tris.reshape(int(len(gathered_bm_tris)/3),3) 
         all_bm_nodes = gathered_bm_nodes 
 
         # sort gathered nodes and remove repetitions (ghosts on bdry)
@@ -68,13 +63,15 @@ def bm_from_fenics_mesh(comm, fenics_comm, fenics_mesh, fenics_space):
         # bm_cells - remap boundary triangle indices between 0-len(bm_nodes) - this can be improved
         all_bm_cells = np.array([[all_bm_nodes_list.index(i) for i in tri] for tri in all_bm_tris], dtype=np.int32)
         all_bm_nodes = np.asarray(all_bm_nodes_list, dtype=np.int32)
-        # Send to Bempp process 
+        # send to Bempp process 
         send(comm, all_bm_coords, MPI.DOUBLE, 100)
         send(comm, all_bm_cells, MPI.INT, 101)
         send(comm, all_bm_nodes, MPI.INT, 102)
         # print("all_bm_cells ", type(all_bm_cells))
 
         num_fenics_vertices = len(np.unique(np.sort(gathered_global_alldofs)))
+
+        # hack - to change
         comm.send(num_fenics_vertices, dest=0, tag=103)
 
 def get_num_fenics_vertices_unique_fenics(fenicsx_comm, fenics_space):
@@ -96,7 +93,6 @@ def recv_fenicsx_bm(comm):
     num_fenics_vertices = comm.recv(source=1, tag=103)
     return bm_nodes, bm_tris, bm_coords, num_fenics_vertices
 
-
 def recv(comm, mpi_type, np_type, info, tag):
     comm.Probe(MPI.ANY_SOURCE, tag, info)
     elements = info.Get_elements(mpi_type)
@@ -107,10 +103,13 @@ def recv(comm, mpi_type, np_type, info, tag):
 
 def gather(comm, arr, mdim, dtype):
     gathered_arr = None
-    sendcounts = np.array(comm.gather(len(arr), root=0))
+    # gathered_arr_1 = None
+    sendcounts = np.array(comm.gather(len(arr)*mdim, root=0))
     if comm.rank == 0:
-        gathered_arr = np.empty(sum(sendcounts)*mdim, dtype=dtype)
-    comm.Gather(arr, gathered_arr, root=0)
+        gathered_arr = np.empty(sum(sendcounts), dtype=dtype)
+        # gathered_arr_1 = np.empty([sum(sendcounts), mdim], dtype=dtype)
+        # print("gathered_arr.shape ", gathered_arr.shape)
+    comm.Gatherv(sendbuf=arr, recvbuf=(gathered_arr, sendcounts), root=0)
     return gathered_arr
 
 def send(comm, arr, dtype, tag):
@@ -119,11 +118,7 @@ def send(comm, arr, dtype, tag):
     
 
 def p1_trace(comm, fenicsx_comm, fenics_mesh, fenics_space):
-    # if comm.rank == 0:
-    #     num_fenics_vertices = get_num_fenics_vertices_unique_fenics(fenicsx_comm, fenics_space)
-    #     print(num_fenics_vertices)
-    # dof_to_vertex_map = np.zeros(num_fenics_vertices, dtype=np.int64)
-
+    
     # not always guaranteed to be equivalent. 
     fs_dofs = fenics_space.dofmap.cell_dofs(0)
     tets = fenics_mesh.geometry.dofmap
